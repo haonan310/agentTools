@@ -1,24 +1,22 @@
 {
   "permissions": {
     "allow": [
-      "Bash(go-forensic *)",
-      "Bash(go-forensic)",
-      "Bash(echo *)",
-      "Bash(test -f *go-forensic*)",
-      "Bash(cat *go-forensic*config.json*)",
-      "Bash(mkdir -p *)",
-      "Bash(printf *)",
-      "Bash(sed *)",
+      "Bash(go-forensic:*)",
+      "Bash(echo:*)",
+      "Bash(test:*)",
+      "Bash(cat:*)",
+      "Bash(mkdir:*)",
+      "Bash(printf:*)",
+      "Bash(sed:*)",
 
-      "PowerShell(go-forensic *)",
-      "PowerShell(go-forensic)",
-      "PowerShell(Test-Path *)",
-      "PowerShell(Get-Content *go-forensic*)",
-      "PowerShell(New-Item *)",
-      "PowerShell(Set-Content *go-forensic*)",
-      "PowerShell(* | ConvertTo-Json *)",
-      "PowerShell(* | ConvertFrom-Json *)",
-      "PowerShell(Join-Path *)"
+      "PowerShell(go-forensic:*)",
+      "PowerShell(Test-Path:*)",
+      "PowerShell(Get-Content:*)",
+      "PowerShell(New-Item:*)",
+      "PowerShell(Set-Content:*)",
+      "PowerShell(ConvertTo-Json:*)",
+      "PowerShell(ConvertFrom-Json:*)",
+      "PowerShell(Join-Path:*)"
     ]
   }
 }
