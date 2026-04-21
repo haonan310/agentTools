@@ -2,5 +2,5 @@
   "name": "go-forensic",
   "version": "0.1.0",
   "description": "Wraps the local go-forensic.exe binary so Claude Code can invoke it via natural-language keywords or the /go-forensic slash command.",
-  "author": "vinda <vinda@jntml.me>"
+  "author": { "name": "haonan310" }
 }
