@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "(?i)(go-forensic|取证|安卓导出|ios导出|iOS导出|sqlite搜索|forensic export|提取.{0,15}(数据|app|应用)|(数据|app|应用).{0,5}提取)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[go-forensic plugin] Keyword detected. You MUST invoke the go-forensic skill via the Skill tool before answering.'"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "agent-tools",
+  "owner": {
+    "name": "vinda",
+    "email": "vinda@jntml.me"
+  },
+  "plugins": [
+    {
+      "name": "go-forensic",
+      "source": "./go-forensic",
+      "description": "Wraps the local go-forensic.exe binary so Claude Code can invoke it via natural-language keywords or the /go-forensic slash command."
+    }
+  ]
+}

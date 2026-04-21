@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash('D:/gocode/bin/go-forensic.exe' --help)",
+      "Bash('D:/gocode/bin/go-forensic.exe' android *)",
+      "Bash('D:/gocode/bin/go-forensic.exe' ios *)",
+      "Bash('D:/gocode/bin/go-forensic.exe' sqlite *)",
+      "Bash('D:/gocode/bin/go-forensic.exe' rm *)",
+      "Bash(go-forensic version *)",
+      "Bash(mkdir -p __TRACKED_VAR__/.claude/skills/go-forensic)",
+      "Bash(cp /d/AiProject/agent-tools/go-forensic/skills/go-forensic/SKILL.md __TRACKED_VAR__/.claude/skills/go-forensic/SKILL.md)",
+      "Bash(mkdir -p __TRACKED_VAR__/.claude/commands)",
+      "Bash(cp /d/AiProject/agent-tools/go-forensic/commands/go-forensic.md __TRACKED_VAR__/.claude/commands/go-forensic.md)",
+      "Bash(python -m json.tool __TRACKED_VAR__/.claude/settings.json)",
+      "Bash(git config *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(git branch *)"
+    ]
+  }
+}
