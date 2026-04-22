@@ -101,6 +101,91 @@ After reading the file content (Step 1), parse the JSON to extract `output_root`
 
 If the user says "改导出目录 / 修改默认路径 / reset config", treat it like first use — ask again and overwrite (steps 2a-e).
 
+### Step 5 — Ensure the iOS export monitor wrapper script is installed
+
+The iOS export uses a wrapper script that watches the tool's log and detects SSH auth failure by polling. Always (re)install it on every invocation — overwrites are cheap and guarantee the latest version. Pick the version matching the session's shell mode.
+
+**Bash mode:**
+```bash
+mkdir -p "$HOME/.go-forensic/scripts"
+cat > "$HOME/.go-forensic/scripts/ios-export-monitor.sh" <<'WRAPPER_EOF'
+#!/usr/bin/env bash
+# go-forensic ios export wrapper.
+# Runs the export in background; polls last log line every 10 s, three times.
+# If all three polls match "getting ssh connection", kills the process and
+# exits 100 (auth failure marker). Otherwise the process runs to completion
+# with NO upper time limit (large legitimate exports can take hours).
+# Usage: ios-export-monitor.sh <output_dir> <bundle_id1> [<bundle_id2> ...] [-- -p PASSWORD]
+set -u
+OUTPUT_DIR="$1"; shift
+BUNDLE_KS=()
+EXTRA=()
+SAW_DDASH=0
+for arg in "$@"; do
+  if [ "$arg" = "--" ]; then SAW_DDASH=1; continue; fi
+  if [ "$SAW_DDASH" = "1" ]; then EXTRA+=("$arg"); else BUNDLE_KS+=(-k "$arg"); fi
+done
+LOG="$HOME/.go-forensic/last-ios-export.log"
+mkdir -p "$(dirname "$LOG")"
+: > "$LOG"
+go-forensic ios export "${BUNDLE_KS[@]}" -o "$OUTPUT_DIR" -u "${EXTRA[@]}" > "$LOG" 2>&1 &
+PID=$!
+shopt -s nocasematch
+for i in 1 2 3; do
+  sleep 10
+  if ! kill -0 "$PID" 2>/dev/null; then
+    wait "$PID"; EC=$?; cat "$LOG"; exit $EC
+  fi
+  LAST=$(tail -1 "$LOG" 2>/dev/null)
+  if [[ "$LAST" != *"getting ssh connection"* ]]; then
+    wait "$PID"; EC=$?; cat "$LOG"; exit $EC
+  fi
+done
+kill "$PID" 2>/dev/null; sleep 1; kill -9 "$PID" 2>/dev/null
+cat "$LOG"
+echo "__AUTH_FAILURE_DETECTED__"
+exit 100
+WRAPPER_EOF
+```
+
+**PowerShell mode:**
+```powershell
+$scriptDir = Join-Path $env:USERPROFILE '.go-forensic\scripts'
+New-Item -ItemType Directory -Force -Path $scriptDir | Out-Null
+$wrapperContent = @'
+# go-forensic ios export wrapper. See Bash version for algorithm.
+# Usage: ios-export-monitor.ps1 -OutputDir <dir> -BundleIds <id1>,<id2>,... [-Password <pass>]
+param(
+  [Parameter(Mandatory)][string]$OutputDir,
+  [Parameter(Mandatory)][string[]]$BundleIds,
+  [string]$Password
+)
+$logDir = Join-Path $env:USERPROFILE '.go-forensic'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$log = Join-Path $logDir 'last-ios-export.log'
+'' | Set-Content $log
+$gfArgs = @('ios','export')
+foreach ($id in $BundleIds) { $gfArgs += @('-k', $id) }
+$gfArgs += @('-o', $OutputDir, '-u')
+if ($Password) { $gfArgs += @('-p', $Password) }
+$proc = Start-Process -FilePath 'go-forensic' -ArgumentList $gfArgs `
+  -RedirectStandardOutput $log -RedirectStandardError $log -PassThru -NoNewWindow
+for ($i = 0; $i -lt 3; $i++) {
+  Start-Sleep -Seconds 10
+  if ($proc.HasExited) { Get-Content $log; exit $proc.ExitCode }
+  $last = Get-Content -Tail 1 $log -ErrorAction SilentlyContinue
+  if ($last -inotmatch 'getting ssh connection') {
+    $proc.WaitForExit(); Get-Content $log; exit $proc.ExitCode
+  }
+}
+Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+Get-Content $log
+Write-Output '__AUTH_FAILURE_DETECTED__'
+exit 100
+'@
+$wrapperContent | Set-Content -Path (Join-Path $scriptDir 'ios-export-monitor.ps1') -Encoding UTF8
+```
+
 ## Output directory derivation (for android export / ios export only)
 
 For every export invocation, the `-o` flag is auto-derived. **Do NOT ask the user for `--output`** — derive it deterministically from the bundle ids:
@@ -141,13 +226,13 @@ Use the `AskUserQuestion` tool — never guess values, never silently fall back 
 
 ## Execution protocol
 
-1. Run the **Initialization protocol** first (config check / lazy create).
-2. For export subcommands: derive `<output_dir>` per the convention above and create the directory using the shell-appropriate command from Step 1d / Step c above.
-3. Build the full command string starting with the bare `go-forensic` command (PATH lookup). For N bundle ids, the command has N repeated `-k <id>` segments.
+1. Run the **Initialization protocol** first (config check / lazy create / wrapper-script install).
+2. For export subcommands: derive `<output_dir>` per the convention above and create the directory using the shell-appropriate command.
+3. Build the full command string. For N bundle ids:
+   - **android export, sqlite, ios device list, ios proxy, version:** invoke `go-forensic` directly (single foreground call). Bash timeout 60000 ms is fine for non-export commands; for `android export` use 600000 ms (10 min) since these can be moderately long.
+   - **ios export:** invoke the wrapper script — see "iOS export execution" below. The wrapper has NO upper time limit by design.
 4. **Echo the resolved command back to the user** in a fenced block before running, so they can spot a wrong flag or bundle id. For exports, also print `Output directory: <output_dir>` directly above the command. **When echoing a command that contains `-p <password>`, mask the password as `-p ***`** — never print the literal password in chat output.
-5. Run via the Bash or PowerShell tool (matching the session's shell mode). Default timeouts:
-   - `android export` / `ios export`: 300000 ms (5 min)
-   - Everything else: 60000 ms (1 min)
+5. Run via the Bash or PowerShell tool. For `ios export` via the wrapper, set the Bash tool's own timeout to a very large value (e.g. 7200000 ms / 2 h) — the wrapper itself has no internal timeout, so this is just an upper safety bound.
 6. After completion, report:
    - Exit code
    - Last ~20 lines of stdout
@@ -155,18 +240,37 @@ Use the `AskUserQuestion` tool — never guess values, never silently fall back 
    - For exports, the resolved output directory path so the user can navigate to it.
 7. If exit code ≠ 0, do **not** silently retry (except for the iOS auth-failure recovery flow defined below). Surface the error and ask the user how to proceed.
 
-### iOS export auth-failure recovery
+### iOS export execution
 
-`ios export` connects to the device over SSH. The default password (`alpine`) often does not match real devices and causes auth failure. **Trigger the recovery only on explicit auth-failure signals from the tool's output — never on a bare timeout** (a long-running export over a slow USB-proxy may legitimately exceed the 5-min timeout without being an auth issue).
+Always go through the wrapper script installed in Init Step 5. Do **not** invoke `go-forensic ios export` directly.
 
-1. First attempt: run `ios export ...` **without** `-p`, with the standard 5-min timeout.
-2. Treat as auth failure **only if** stdout or stderr contains any of: `permission denied` (case-insensitive), `Permission denied`, `authentication failed`, `publickey,password`, or a stand-alone English `password` token in an error context (not a command-line flag echo). A pure timeout / process-kill is **not** an auth signal.
+**Bash mode:**
+```bash
+bash "$HOME/.go-forensic/scripts/ios-export-monitor.sh" "<output_dir>" <bundle_id_1> [<bundle_id_2> ...] [-- -p "<password>"]
+```
+
+**PowerShell mode:**
+```powershell
+pwsh "$env:USERPROFILE\.go-forensic\scripts\ios-export-monitor.ps1" -OutputDir "<output_dir>" -BundleIds <id1>,<id2>,... [-Password "<password>"]
+```
+
+The wrapper:
+- Runs `go-forensic ios export ... -u` in the background, redirecting all output to `~/.go-forensic/last-ios-export.log`.
+- Polls the last line of that log **every 10 seconds, three times** (~30 s total observation window).
+- If **all three** polls show the line `getting ssh connection` (case-insensitive), it kills the process and exits **100** with `__AUTH_FAILURE_DETECTED__` printed to stdout.
+- If any poll shows a different last line (= the SSH handshake succeeded and real export is in progress), it waits for the process to complete with **no upper time limit** and propagates the original exit code.
+- All log content is also tee'd to stdout when the wrapper exits, so the caller sees full output.
+
+### iOS export auth-failure recovery (wrapper-based)
+
+1. First attempt: invoke the wrapper **without** `-p`.
+2. Treat as auth failure **only if** the wrapper exits with code **100** OR its stdout contains `__AUTH_FAILURE_DETECTED__`. Other auth-related strings in output are **ignored** at the skill level — the wrapper alone owns the detection logic.
 3. Recovery on auth failure:
-   - Use `AskUserQuestion` to ask: "iOS 设备的 SSH 密码是什么？（go-forensic 默认尝试 `alpine`，看起来认证失败了。)"
-   - Re-run the **same command** (same bundle ids, same `-o`) with `-p "<password>"` appended and the same 5-min timeout.
-   - In the pre-run echo, mask the password as described in step 4 above.
-4. If the password-augmented retry still fails with auth, **stop**. Do not loop. Tell the user the password did not work and ask them to verify it / the device connection, then wait for instructions.
-5. **Timeout (no auth signal) handling:** report the timeout to the user and ask whether to (a) retry with a longer timeout, (b) narrow the bundle id list / paths, or (c) abort. Do **not** auto-prompt for a password in this case.
+   - Use `AskUserQuestion` to ask: "iOS 设备的 SSH 密码是什么？（go-forensic 默认尝试 `alpine`，监控判定为认证卡住。)"
+   - Re-invoke the wrapper with the **same bundle ids, same output dir**, but append `-- -p "<password>"` (Bash) or `-Password "<pwd>"` (PowerShell).
+   - In the pre-run echo, mask the password as `***`.
+4. If the password-augmented retry **also** exits 100, **stop**. Do not loop. Tell the user the password did not work and ask them to verify it / the device connection, then wait for instructions.
+5. Other non-zero exit codes from the wrapper: surface normally, **do not auto-prompt for password** (those are real export errors, not auth issues).
 6. Never persist the password to disk, the config file, memory, or any log. Hold it only for the immediate retry.
 
 ## Hard safety rules

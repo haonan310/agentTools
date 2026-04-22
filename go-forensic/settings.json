@@ -2,21 +2,39 @@
   "permissions": {
     "allow": [
       "Bash(go-forensic:*)",
+      "Bash(go-forensic ios:*)",
+      "Bash(go-forensic android:*)",
+      "Bash(go-forensic sqlite:*)",
+
+      "Bash(bash:*)",
+
       "Bash(echo:*)",
       "Bash(test:*)",
       "Bash(cat:*)",
       "Bash(mkdir:*)",
       "Bash(printf:*)",
       "Bash(sed:*)",
+      "Bash(tail:*)",
+      "Bash(kill:*)",
+      "Bash(sleep:*)",
 
       "PowerShell(go-forensic:*)",
+      "PowerShell(go-forensic ios:*)",
+      "PowerShell(go-forensic android:*)",
+      "PowerShell(go-forensic sqlite:*)",
+
+      "PowerShell(pwsh:*)",
+
       "PowerShell(Test-Path:*)",
       "PowerShell(Get-Content:*)",
       "PowerShell(New-Item:*)",
       "PowerShell(Set-Content:*)",
       "PowerShell(ConvertTo-Json:*)",
       "PowerShell(ConvertFrom-Json:*)",
-      "PowerShell(Join-Path:*)"
+      "PowerShell(Join-Path:*)",
+      "PowerShell(Start-Process:*)",
+      "PowerShell(Stop-Process:*)",
+      "PowerShell(Start-Sleep:*)"
     ]
   }
 }
