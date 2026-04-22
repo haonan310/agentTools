@@ -110,13 +110,19 @@ The iOS export uses a wrapper script that watches the tool's log and detects SSH
 mkdir -p "$HOME/.go-forensic/scripts"
 cat > "$HOME/.go-forensic/scripts/ios-export-monitor.sh" <<'WRAPPER_EOF'
 #!/usr/bin/env bash
-# go-forensic ios export wrapper.
-# Runs the export in background; polls last log line every 10 s, three times.
-# If all three polls match "getting ssh connection", kills the process and
-# exits 100 (auth failure marker). Otherwise the process runs to completion
-# with NO upper time limit (large legitimate exports can take hours).
+# go-forensic ios export wrapper with chatty real-time progress.
+# Algorithm:
+#   - Run export in background, redirecting all output to ~/.go-forensic/last-ios-export.log
+#   - During the first 30s (SSH-detection window): emit a heartbeat line every 5s
+#     showing the current last-log-line; sample at t=10/20/30s for SSH strikes;
+#     three consecutive 'getting ssh connection' samples → kill, exit 100.
+#   - After the window (handshake passed): emit a progress line every 10s with
+#     file count + dir size + last log line, until the process exits.
+# Output is unbuffered (line-by-line echo + immediate stdout flush) so the user
+# sees real-time progress in the Claude Code UI when run in foreground.
 # Usage: ios-export-monitor.sh <output_dir> <bundle_id1> [<bundle_id2> ...] [-- -p PASSWORD]
 set -u
+
 OUTPUT_DIR="$1"; shift
 BUNDLE_KS=()
 EXTRA=()
@@ -125,26 +131,77 @@ for arg in "$@"; do
   if [ "$arg" = "--" ]; then SAW_DDASH=1; continue; fi
   if [ "$SAW_DDASH" = "1" ]; then EXTRA+=("$arg"); else BUNDLE_KS+=(-k "$arg"); fi
 done
+
 LOG="$HOME/.go-forensic/last-ios-export.log"
 mkdir -p "$(dirname "$LOG")"
+mkdir -p "$OUTPUT_DIR"
 : > "$LOG"
+
+START_TS=$(date +%s)
+echo "[start] $(date '+%Y-%m-%d %H:%M:%S') exporting bundles=[${BUNDLE_KS[*]}] -> $OUTPUT_DIR"
+
 go-forensic ios export "${BUNDLE_KS[@]}" -o "$OUTPUT_DIR" -u "${EXTRA[@]}" > "$LOG" 2>&1 &
 PID=$!
+echo "[start] PID=$PID  log=$LOG"
+
 shopt -s nocasematch
-for i in 1 2 3; do
-  sleep 10
+ssh_strikes=0
+
+for sec in $(seq 1 30); do
+  sleep 1
+
   if ! kill -0 "$PID" 2>/dev/null; then
-    wait "$PID"; EC=$?; cat "$LOG"; exit $EC
+    wait "$PID" 2>/dev/null; EC=$?
+    COUNT=$(find "$OUTPUT_DIR" -type f 2>/dev/null | wc -l)
+    echo "[done] early exit at ${sec}s, code=$EC, total $COUNT files"
+    cat "$LOG"
+    exit $EC
   fi
+
   LAST=$(tail -1 "$LOG" 2>/dev/null)
-  if [[ "$LAST" != *"getting ssh connection"* ]]; then
-    wait "$PID"; EC=$?; cat "$LOG"; exit $EC
+
+  # 5s heartbeat
+  if [ $((sec % 5)) -eq 0 ]; then
+    echo "[t=${sec}s] $LAST"
+  fi
+
+  # SSH strike check at 10/20/30
+  if [ $((sec % 10)) -eq 0 ]; then
+    if [[ "$LAST" == *"getting ssh connection"* ]]; then
+      ssh_strikes=$((ssh_strikes + 1))
+      echo "[ssh-check ${sec}s] strike $ssh_strikes/3 (still 'getting ssh connection')"
+    else
+      ssh_strikes=0
+    fi
   fi
 done
-kill "$PID" 2>/dev/null; sleep 1; kill -9 "$PID" 2>/dev/null
+
+if [ $ssh_strikes -ge 3 ]; then
+  echo "[auth-fail] 3 consecutive 'getting ssh connection' strikes — killing PID $PID"
+  kill "$PID" 2>/dev/null; sleep 1; kill -9 "$PID" 2>/dev/null
+  cat "$LOG"
+  echo "__AUTH_FAILURE_DETECTED__"
+  exit 100
+fi
+
+echo "[ssh-ok] handshake apparently passed, entering progress mode (tick every 10s)"
+
+while kill -0 "$PID" 2>/dev/null; do
+  sleep 10
+  ELAPSED=$(($(date +%s) - START_TS))
+  COUNT=$(find "$OUTPUT_DIR" -type f 2>/dev/null | wc -l)
+  SIZE=$(du -sh "$OUTPUT_DIR" 2>/dev/null | awk '{print $1}')
+  LAST=$(tail -1 "$LOG" 2>/dev/null)
+  echo "[progress ${ELAPSED}s] $COUNT files, $SIZE | $LAST"
+done
+
+wait "$PID" 2>/dev/null; EC=$?
+ELAPSED=$(($(date +%s) - START_TS))
+COUNT=$(find "$OUTPUT_DIR" -type f 2>/dev/null | wc -l)
+SIZE=$(du -sh "$OUTPUT_DIR" 2>/dev/null | awk '{print $1}')
+echo "[done] exit=$EC after ${ELAPSED}s, total $COUNT files ($SIZE)"
 cat "$LOG"
-echo "__AUTH_FAILURE_DETECTED__"
-exit 100
+exit $EC
 WRAPPER_EOF
 ```
 
@@ -153,35 +210,87 @@ WRAPPER_EOF
 $scriptDir = Join-Path $env:USERPROFILE '.go-forensic\scripts'
 New-Item -ItemType Directory -Force -Path $scriptDir | Out-Null
 $wrapperContent = @'
-# go-forensic ios export wrapper. See Bash version for algorithm.
+# go-forensic ios export wrapper with chatty real-time progress.
+# See Bash version for algorithm.
 # Usage: ios-export-monitor.ps1 -OutputDir <dir> -BundleIds <id1>,<id2>,... [-Password <pass>]
 param(
   [Parameter(Mandatory)][string]$OutputDir,
   [Parameter(Mandatory)][string[]]$BundleIds,
   [string]$Password
 )
+
 $logDir = Join-Path $env:USERPROFILE '.go-forensic'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $log = Join-Path $logDir 'last-ios-export.log'
 '' | Set-Content $log
+
 $gfArgs = @('ios','export')
 foreach ($id in $BundleIds) { $gfArgs += @('-k', $id) }
 $gfArgs += @('-o', $OutputDir, '-u')
 if ($Password) { $gfArgs += @('-p', $Password) }
+
+$startTs = Get-Date
+Write-Host "[start] $($startTs.ToString('yyyy-MM-dd HH:mm:ss')) exporting bundles=[$($BundleIds -join ',')] -> $OutputDir"
+
 $proc = Start-Process -FilePath 'go-forensic' -ArgumentList $gfArgs `
   -RedirectStandardOutput $log -RedirectStandardError $log -PassThru -NoNewWindow
-for ($i = 0; $i -lt 3; $i++) {
-  Start-Sleep -Seconds 10
-  if ($proc.HasExited) { Get-Content $log; exit $proc.ExitCode }
+Write-Host "[start] PID=$($proc.Id)  log=$log"
+
+$sshStrikes = 0
+for ($sec = 1; $sec -le 30; $sec++) {
+  Start-Sleep -Seconds 1
+
+  if ($proc.HasExited) {
+    $count = (Get-ChildItem -Path $OutputDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+    Write-Host "[done] early exit at ${sec}s, code=$($proc.ExitCode), total $count files"
+    Get-Content $log
+    exit $proc.ExitCode
+  }
+
   $last = Get-Content -Tail 1 $log -ErrorAction SilentlyContinue
-  if ($last -inotmatch 'getting ssh connection') {
-    $proc.WaitForExit(); Get-Content $log; exit $proc.ExitCode
+
+  if (($sec % 5) -eq 0) {
+    Write-Host "[t=${sec}s] $last"
+  }
+
+  if (($sec % 10) -eq 0) {
+    if ($last -imatch 'getting ssh connection') {
+      $sshStrikes++
+      Write-Host "[ssh-check ${sec}s] strike $sshStrikes/3 (still 'getting ssh connection')"
+    } else {
+      $sshStrikes = 0
+    }
   }
 }
-Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+
+if ($sshStrikes -ge 3) {
+  Write-Host "[auth-fail] 3 consecutive 'getting ssh connection' strikes — killing PID $($proc.Id)"
+  Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+  Get-Content $log
+  Write-Output '__AUTH_FAILURE_DETECTED__'
+  exit 100
+}
+
+Write-Host "[ssh-ok] handshake apparently passed, entering progress mode (tick every 10s)"
+
+while (-not $proc.HasExited) {
+  Start-Sleep -Seconds 10
+  $elapsed = [int]((Get-Date) - $startTs).TotalSeconds
+  $count = (Get-ChildItem -Path $OutputDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+  $size = (Get-ChildItem -Path $OutputDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+  $sizeMb = [math]::Round($size / 1MB, 1)
+  $last = Get-Content -Tail 1 $log -ErrorAction SilentlyContinue
+  Write-Host "[progress ${elapsed}s] $count files, ${sizeMb} MB | $last"
+}
+
+$elapsed = [int]((Get-Date) - $startTs).TotalSeconds
+$count = (Get-ChildItem -Path $OutputDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+$size = (Get-ChildItem -Path $OutputDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+$sizeMb = [math]::Round($size / 1MB, 1)
+Write-Host "[done] exit=$($proc.ExitCode) after ${elapsed}s, total $count files (${sizeMb} MB)"
 Get-Content $log
-Write-Output '__AUTH_FAILURE_DETECTED__'
-exit 100
+exit $proc.ExitCode
 '@
 $wrapperContent | Set-Content -Path (Join-Path $scriptDir 'ios-export-monitor.ps1') -Encoding UTF8
 ```
@@ -244,6 +353,8 @@ Use the `AskUserQuestion` tool — never guess values, never silently fall back 
 
 Always go through the wrapper script installed in Init Step 5. Do **not** invoke `go-forensic ios export` directly.
 
+> **CRITICAL — must run in foreground:** invoke the wrapper with the Bash/PowerShell tool's `run_in_background` parameter set to **false (the default)**. Background execution defeats the wrapper's whole purpose — the wrapper IS the monitoring loop, and if you fire it into the background you also fire its real-time progress lines into the void. The user must see the [start] / [t=Ns] / [progress] / [done] lines stream in their UI as they happen. Set the Bash tool's own timeout to a generous upper bound (e.g. 7200000 ms / 2 h) — the wrapper itself has no internal timeout, this is just a safety ceiling.
+
 **Bash mode:**
 ```bash
 bash "$HOME/.go-forensic/scripts/ios-export-monitor.sh" "<output_dir>" <bundle_id_1> [<bundle_id_2> ...] [-- -p "<password>"]
@@ -254,12 +365,16 @@ bash "$HOME/.go-forensic/scripts/ios-export-monitor.sh" "<output_dir>" <bundle_i
 pwsh "$env:USERPROFILE\.go-forensic\scripts\ios-export-monitor.ps1" -OutputDir "<output_dir>" -BundleIds <id1>,<id2>,... [-Password "<password>"]
 ```
 
-The wrapper:
-- Runs `go-forensic ios export ... -u` in the background, redirecting all output to `~/.go-forensic/last-ios-export.log`.
-- Polls the last line of that log **every 10 seconds, three times** (~30 s total observation window).
-- If **all three** polls show the line `getting ssh connection` (case-insensitive), it kills the process and exits **100** with `__AUTH_FAILURE_DETECTED__` printed to stdout.
-- If any poll shows a different last line (= the SSH handshake succeeded and real export is in progress), it waits for the process to complete with **no upper time limit** and propagates the original exit code.
-- All log content is also tee'd to stdout when the wrapper exits, so the caller sees full output.
+What the wrapper emits (so you know what to expect on stdout):
+- `[start] <timestamp> exporting bundles=[...] -> <dir>` and `[start] PID=N log=...` immediately on launch
+- `[t=Ns] <last log line>` every 5 s during the first 30 s — heartbeat so user knows it's alive
+- `[ssh-check Ns] strike X/3 ...` at t=10/20/30 s if last log line still says "getting ssh connection"
+- `[auth-fail] ...` + `__AUTH_FAILURE_DETECTED__` + `exit 100` if 3 strikes hit
+- `[ssh-ok] handshake apparently passed, entering progress mode` once SSH clears
+- `[progress Ns] N files, X MB | <last log line>` every 10 s while the export is running (no upper time limit)
+- `[done] exit=N after Ns, total N files (X MB)` at the end, followed by the full log
+
+Do not summarize away these lines — pass them through to the user's view. They are the visibility mechanism.
 
 ### iOS export auth-failure recovery (wrapper-based)
 
